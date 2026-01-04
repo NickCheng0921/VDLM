@@ -11,6 +11,7 @@ import time
 import uuid
 
 import logging
+import logging.handlers
 import multiprocessing
 
 try:
@@ -20,7 +21,11 @@ try:
 except RuntimeError:
     pass
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(levelname)s %(asctime)s %(processName)s(pid=%(process)d) [%(filename)s:%(lineno)d] %(message)s",
+    datefmt="%m-%d %H:%M:%S",
+)
 logger = logging.getLogger("VDLM_API")
 
 from llm_engine import LLMEngine
@@ -48,7 +53,7 @@ async def response_watcher():
 
             if request_id in pending_requests:
                 future = pending_requests.pop(request_id)
-                if not future.done():
+                if not future.done():  # TODO, when will this future be set elsewhere?
                     future.set_result(text)
             else:
                 logger.warning(
@@ -127,7 +132,6 @@ async def create_completion(request: CompletionRequest):
     # Extract single prompt if it's a list for this simple skeleton
     prompt = request.prompt if isinstance(request.prompt, str) else request.prompt[0]
 
-    logger.info(f"Submitting request {request_id} to engine...")
     engine.submit_request(request_id, prompt)
 
     try:
@@ -148,6 +152,17 @@ async def create_completion(request: CompletionRequest):
 
 
 if __name__ == "__main__":
+    import argparse
     import uvicorn
+
+    parser = argparse.ArgumentParser(description="VDLM API Server")
+    parser.add_argument(
+        "--mock", action="store_true", help="Run with mock LLM engine (fast mode)"
+    )
+    args = parser.parse_args()
+
+    if args.mock:
+        logger.info("Starting in MOCK mode")
+        engine = LLMEngine(is_mock=True)
 
     uvicorn.run(app, host="0.0.0.0", port=8000)
