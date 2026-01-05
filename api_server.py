@@ -120,11 +120,24 @@ class CompletionResponse(BaseModel):
     usage: CompletionUsage
 
 
+@app.get("/health")
+async def health_check():
+    """Health check endpoint to verify if the model is loaded."""
+    if not engine.ready_event.is_set():
+        raise HTTPException(status_code=503, detail="Model is loading")
+    return {"status": "ok", "model_loaded": True}
+
+
 @app.post("/completions", response_model=CompletionResponse)
 async def create_completion(request: CompletionRequest):
     """
     Endpoint for OpenAI-style completions using a separate LLM Engine process.
     """
+    if not engine.ready_event.is_set():
+        raise HTTPException(
+            status_code=503, detail="Model is still loading. Please try again later."
+        )
+
     request_id = str(uuid.uuid4())
     future = asyncio.get_running_loop().create_future()
     pending_requests[request_id] = future

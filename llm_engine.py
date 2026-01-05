@@ -25,12 +25,18 @@ def mock_engine_loop(
     request_queue: multiprocessing.Queue,
     response_queue: multiprocessing.Queue,
     log_queue: multiprocessing.Queue,
+    ready_event: multiprocessing.Event,
 ):
     """
     Fast mock loop for testing API and infrastructure without model overhead.
     """
     setup_child_logging(log_queue)
     logger.info("Mock LLM Engine process started")
+
+    # Simulate a short startup delay
+    time.sleep(0.5)
+    ready_event.set()
+    logger.info("Mock Engine ready.")
 
     while True:
         try:
@@ -56,12 +62,42 @@ def engine_loop(
     request_queue: multiprocessing.Queue,
     response_queue: multiprocessing.Queue,
     log_queue: multiprocessing.Queue,
+    ready_event: multiprocessing.Event,
 ):
     """
     Main engine loop. Handles input/output queue and performs model loading + generation.
     """
     setup_child_logging(log_queue)
     logger.info("LLM Engine process started")
+
+    try:
+        import torch
+        from transformers import AutoTokenizer
+        from model.modeling_llada import LLaDAModelLM
+        from generate import generate_with_dual_cache
+
+        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        logger.info(f"Loading model on {device}...")
+
+        checkpoint = "GSAI-ML/LLaDA-8B-Instruct"
+
+        model = (
+            LLaDAModelLM.from_pretrained(
+                checkpoint, trust_remote_code=True, torch_dtype=torch.bfloat16
+            )
+            .to(device)
+            .eval()
+        )
+
+        tokenizer = AutoTokenizer.from_pretrained(checkpoint, trust_remote_code=True)
+
+        logger.info("Model loaded successfully.")
+        ready_event.set()
+
+    except Exception as e:
+        logger.critical(f"Failed to load model environment: {e}")
+        # return 503s permanently on engine bricking
+        return
 
     while True:
         try:
@@ -74,14 +110,41 @@ def engine_loop(
 
             logger.info(f"Processing request {request_id}")
 
-            time.sleep(2.0)
-            generated_text = f"Simulated response for: '{prompt}'"
+            # Sampling parameters (Hardcoded for simplicity)
+            gen_length = 128
+            steps = 128
+            block_length = 32
+            temperature = 0.0
+            remasking = "low_confidence"
 
-            response_queue.put((request_id, generated_text))
-            logger.info(f"Finished request {request_id}.")
+            m = [{"role": "user", "content": prompt}]
+            formatted_prompt = tokenizer.apply_chat_template(
+                m, add_generation_prompt=True, tokenize=False
+            )
+            input_ids = tokenizer(formatted_prompt)["input_ids"]
+            input_ids = torch.tensor(input_ids).to(device).unsqueeze(0)
+
+            # Generate
+            with torch.no_grad():
+                out, nfe = generate_with_dual_cache(
+                    model,
+                    input_ids,
+                    steps=steps,
+                    gen_length=gen_length,
+                    block_length=block_length,
+                    temperature=temperature,
+                    remasking=remasking,
+                )
+
+            generated_tokens = out[0][input_ids.shape[1] :]
+            answer = tokenizer.decode(generated_tokens, skip_special_tokens=True)
+
+            response_queue.put((request_id, answer))
+            logger.info(f"Finished request {request_id}")
 
         except Exception as e:
             logger.error(f"Error in engine loop: {e}")
+            response_queue.put((request_id, f"Error processing request: {str(e)}"))
 
 
 class LLMEngine:
@@ -89,6 +152,7 @@ class LLMEngine:
         self.request_queue = multiprocessing.Queue()
         self.response_queue = multiprocessing.Queue()
         self.log_queue = multiprocessing.Queue()
+        self.ready_event = multiprocessing.Event()
         self.process = None
         self.log_listener = None
         self.is_mock = is_mock
@@ -104,7 +168,12 @@ class LLMEngine:
 
         self.process = multiprocessing.Process(
             target=target_loop,
-            args=(self.request_queue, self.response_queue, self.log_queue),
+            args=(
+                self.request_queue,
+                self.response_queue,
+                self.log_queue,
+                self.ready_event,
+            ),
             daemon=True,
             name=loop_name,
         )

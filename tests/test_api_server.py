@@ -1,14 +1,25 @@
 """
-Unit tests for the VDLM API server completions endpoint.
-Run api_server before running 'pytest'
+Tests for the VDLM API server completions endpoint.
+
+Runs engine in mock mode
 """
 
 from fastapi.testclient import TestClient
-from api_server import app
+from api_server import app, engine
+
+engine.is_mock = True
 
 
 def test_read_main_completions():
     with TestClient(app) as client:
+        # Wait for mock engine to be ready after 0.5s sleep
+        import time
+
+        for _ in range(20):
+            if engine.ready_event.is_set():
+                break
+            time.sleep(0.1)
+
         payload = {
             "model": "vdlm-v1",
             "prompt": "Hello world",
@@ -22,6 +33,27 @@ def test_read_main_completions():
         assert data["model"] == "vdlm-v1"
         assert len(data["choices"]) > 0
         assert "text" in data["choices"][0]
+
+
+def test_model_loading_503():
+    """Test that we get a 503 if the model is not ready."""
+    with TestClient(app) as client:
+        # Manually clear the event to simulate loading state
+        engine.ready_event.clear()
+
+        payload = {
+            "model": "vdlm-v1",
+            "prompt": "Test",
+        }
+        response = client.post("/completions", json=payload)
+        assert response.status_code == 503
+        assert (
+            response.json()["detail"]
+            == "Model is still loading. Please try again later."
+        )
+
+        # Reset event for other tests (though client teardown might handle it, better safe)
+        engine.ready_event.set()
 
 
 def test_validation_error():
