@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 Nick Cheng
+
 """
 Tests for the VDLM API server completions endpoint.
 

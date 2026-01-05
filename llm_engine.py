@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 Nick Cheng
+
 """
 LLM Engine - Separate process for running MDM inference
 Handles model lifecycle, request queuing, and response delivery
@@ -76,7 +79,7 @@ def engine_loop(
         from model.modeling_llada import LLaDAModelLM
         from generate import generate_with_dual_cache
 
-        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        device = "cuda" if torch.cuda.is_available() else "cpu"
         logger.info(f"Loading model on {device}...")
 
         checkpoint = "GSAI-ML/LLaDA-8B-Instruct"

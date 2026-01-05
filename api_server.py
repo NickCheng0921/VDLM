@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 Nick Cheng
+
 """
 VDLM API Server - OpenAI-compatible FastAPI implementation for MDM diffusion LM.
 """
