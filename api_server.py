@@ -31,7 +31,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("VDLM_API")
 
-from llm_engine import LLMEngine
+from llm_engine import LLMEngine, SamplingParams
 
 engine = LLMEngine()
 pending_requests: Dict[str, asyncio.Future] = {}
@@ -51,13 +51,13 @@ async def response_watcher():
             if result is None:
                 break
 
-            request_id, text = result
+            request_id, success, output = result
             logger.debug(f"Response watcher received result for {request_id}")
 
             if request_id in pending_requests:
                 future = pending_requests.pop(request_id)
                 if not future.done():  # TODO, when will this future be set elsewhere?
-                    future.set_result(text)
+                    future.set_result((success, output))
             else:
                 logger.warning(
                     f"Request ID {request_id} not found in pending_requests!"
@@ -99,6 +99,8 @@ class CompletionRequest(BaseModel):
     stream: Optional[bool] = False
     logprobs: Optional[int] = None
     stop: Optional[Union[str, List[str]]] = None
+    block_length: Optional[int] = None
+    steps: Optional[int] = None
 
 
 class CompletionChoice(BaseModel):
@@ -148,10 +150,27 @@ async def create_completion(request: CompletionRequest):
     # Extract single prompt if it's a list for this simple skeleton
     prompt = request.prompt if isinstance(request.prompt, str) else request.prompt[0]
 
-    engine.submit_request(request_id, prompt)
+    sampling_kwargs = {
+        "model": request.model,
+        "prompt": prompt,
+    }
+
+    optional_params = ["max_tokens", "temperature", "block_length", "steps"]
+    for param in optional_params:
+        val = getattr(request, param)
+        if val is not None:
+            sampling_kwargs[param] = val
+
+    params = SamplingParams(**sampling_kwargs)
+
+    engine.submit_request(request_id, params)
 
     try:
-        generated_text = await asyncio.wait_for(future, timeout=30.0)
+        success, generated_text = await asyncio.wait_for(future, timeout=30.0)
+
+        if not success:
+            raise HTTPException(status_code=400, detail=generated_text)
+
     except asyncio.TimeoutError:
         pending_requests.pop(request_id, None)
         raise HTTPException(status_code=504, detail="LLM Engine timeout")

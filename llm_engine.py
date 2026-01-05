@@ -12,7 +12,35 @@ import sys
 import logging
 import logging.handlers
 
+from dataclasses import dataclass
+from typing import Union, Optional
+
 logger = logging.getLogger("LLMEngine")
+
+
+@dataclass
+class SamplingParams:
+    model: str
+    prompt: str
+    max_tokens: int = 128
+    block_length: int = 32
+    temperature: float = 0.0
+    steps: int = 128
+    remasking: str = "low_confidence"
+
+
+def validate_params(params: SamplingParams) -> Union[str, None]:
+    """
+    Validates generation parameters. Returns an error message string if invalid, or None if valid.
+    """
+    if params.max_tokens % params.block_length != 0:
+        return f"max_tokens ({params.max_tokens}) must be divisible by block_length ({params.block_length})"
+
+    num_blocks = params.max_tokens // params.block_length
+    if params.steps % num_blocks != 0:
+        return f"steps ({params.steps}) must be divisible by num_blocks ({num_blocks}) [max_tokens/block_length]"
+
+    return None
 
 
 def setup_child_logging(log_queue: multiprocessing.Queue):
@@ -42,23 +70,36 @@ def mock_engine_loop(
     logger.info("Mock Engine ready.")
 
     while True:
+        request_id = None
         try:
             result = request_queue.get()
-            request_id, prompt = result
+            request_id, params = result
 
             if request_id is None:  # Shutdown signal
                 logger.info("Mock Engine received shutdown signal")
                 break
 
+            # Validation
+            validation_error = validate_params(params)
+            if validation_error:
+                logger.error(
+                    f"Request {request_id} failed validation: {validation_error}"
+                )
+                response_queue.put((request_id, False, validation_error))
+                continue
+
             logger.info(f"Processing request {request_id} (MOCK)")
 
-            generated_text = f"Mock response for: '{prompt}'"
+            generated_text = f"Mock response for: '{params.prompt}'"
 
-            response_queue.put((request_id, generated_text))
+            response_queue.put((request_id, True, generated_text))
             logger.info(f"Finished request {request_id}.")
 
         except Exception as e:
             logger.error(f"Error in mock engine loop: {e}")
+            # If we have a request_id, try to report the error
+            if request_id is not None:
+                response_queue.put((request_id, False, f"Internal Error: {str(e)}"))
 
 
 def engine_loop(
@@ -103,9 +144,10 @@ def engine_loop(
         return
 
     while True:
+        request_id = None
         try:
             result = request_queue.get()
-            request_id, prompt = result
+            request_id, params = result
 
             if request_id is None:
                 logger.info("Engine received shutdown signal")
@@ -113,14 +155,17 @@ def engine_loop(
 
             logger.info(f"Processing request {request_id}")
 
-            # Sampling parameters (Hardcoded for simplicity)
-            gen_length = 128
-            steps = 128
-            block_length = 32
-            temperature = 0.0
-            remasking = "low_confidence"
+            # Validation
+            validation_error = validate_params(params)
+            if validation_error:
+                logger.error(
+                    f"Request {request_id} failed validation: {validation_error}"
+                )
+                response_queue.put((request_id, False, validation_error))
+                continue
 
-            m = [{"role": "user", "content": prompt}]
+            # Tokenize
+            m = [{"role": "user", "content": params.prompt}]
             formatted_prompt = tokenizer.apply_chat_template(
                 m, add_generation_prompt=True, tokenize=False
             )
@@ -132,22 +177,25 @@ def engine_loop(
                 out, nfe = generate_with_dual_cache(
                     model,
                     input_ids,
-                    steps=steps,
-                    gen_length=gen_length,
-                    block_length=block_length,
-                    temperature=temperature,
-                    remasking=remasking,
+                    steps=params.steps,
+                    gen_length=params.max_tokens,
+                    block_length=params.block_length,
+                    temperature=params.temperature,
+                    remasking=params.remasking,
                 )
 
             generated_tokens = out[0][input_ids.shape[1] :]
             answer = tokenizer.decode(generated_tokens, skip_special_tokens=True)
 
-            response_queue.put((request_id, answer))
+            response_queue.put((request_id, True, answer))
             logger.info(f"Finished request {request_id}")
 
         except Exception as e:
             logger.error(f"Error in engine loop: {e}")
-            response_queue.put((request_id, f"Error processing request: {str(e)}"))
+            if request_id is not None:
+                response_queue.put(
+                    (request_id, False, f"Error processing request: {str(e)}")
+                )
 
 
 class LLMEngine:
@@ -191,7 +239,7 @@ class LLMEngine:
 
             if self.process.is_alive():
                 logger.warning(
-                    "Engine did not exit gracefully (likely queue deadlock), forcing termination..."
+                    "Engine did not exit gracefully w/in timeout, forcing termination..."
                 )
                 self.process.terminate()
                 self.process.join()
@@ -202,5 +250,5 @@ class LLMEngine:
             self.log_listener.stop()
             self.log_listener = None
 
-    def submit_request(self, request_id: str, prompt: str):
-        self.request_queue.put((request_id, prompt))
+    def submit_request(self, request_id: str, params: SamplingParams):
+        self.request_queue.put((request_id, params))
