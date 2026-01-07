@@ -93,7 +93,7 @@ class CompletionRequest(BaseModel):
     model: str
     prompt: Union[str, List[str]]
     max_tokens: Optional[int] = 16
-    temperature: Optional[float] = 1.0
+    temperature: Optional[float] = None
     top_p: Optional[float] = 1.0
     n: Optional[int] = 1
     stream: Optional[bool] = False
